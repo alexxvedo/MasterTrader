@@ -174,8 +174,8 @@ export default function AccountDetail() {
     console.log("EA Magic Map:", eaMagicMap);
 
     return deals.map((deal) => {
-      // Determinar si es un mensaje del nuevo formato (con positionId, price_open, etc.)
-      const isNewFormat = deal.hasOwnProperty("positionId");
+      // Determinar si es un mensaje del nuevo formato (con ticket, price_open, etc.)
+      const isNewFormat = deal.hasOwnProperty("ticket") && deal.hasOwnProperty("price_open");
 
       let magic = 0;
       let eaName = "Manual";
@@ -202,7 +202,7 @@ export default function AccountDetail() {
 
         // Nuevo formato
         return {
-          ticket: deal.positionId,
+          ticket: deal.ticket,
           symbol: deal.symbol,
           side: side,
           volume: deal.volume,
@@ -1207,8 +1207,8 @@ export default function AccountDetail() {
                               <TableCell>{deal.symbol}</TableCell>
                               <TableCell>{deal.volume.toFixed(2)}</TableCell>
                               <TableCell>
-                                {deal.entryPrice.toFixed(5)}
-                                {deal.completed && (
+                                {deal.entryPrice ? deal.entryPrice.toFixed(5) : "N/A"}
+                                {deal.completed && deal.exitPrice && (
                                   <div className="text-xs text-muted-foreground">
                                     → {deal.exitPrice.toFixed(5)}
                                   </div>
