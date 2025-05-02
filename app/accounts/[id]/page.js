@@ -49,9 +49,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Trash2 } from "lucide-react";
-import { BalanceChart } from "@/components/charts/balance-chart";
-import { WinLossChart } from "@/components/charts/win-loss-chart";
-import { PerformanceChart } from "@/components/charts/performance-chart";
+import {
+  ModernBalanceChart,
+  ModernWinLossChart,
+  ModernPerformanceChart,
+} from "@/components/ui/modern-charts";
 
 export default function AccountDetail() {
   const params = useParams();
@@ -88,9 +90,10 @@ export default function AccountDetail() {
         setAccountData(accountData);
 
         if (accountData) {
-          // Cargar EAs asociados a esta cuenta
-          const accountEAs = await EAService.getEAsByAccount(accountData.id);
+          // Cargar EAs asociados a esta cuenta usando el número de cuenta
+          const accountEAs = getAccountEAs(accountData.accountNumber);
           setAccountEAs(accountEAs);
+          console.log("EAs cargados:", accountEAs);
         }
       } catch (error) {
         console.error("Error al cargar detalles de la cuenta:", error);
@@ -100,7 +103,7 @@ export default function AccountDetail() {
     }
 
     fetchAccountDetails();
-  }, [accountNumber, localAccounts, localEAs]);
+  }, [accountNumber, localAccounts, getAccountEAs]);
 
   // Obtener datos en tiempo real del WebSocket
   const liveData = accounts[accountNumber] || {
@@ -159,16 +162,49 @@ export default function AccountDetail() {
   const processDeals = (deals) => {
     if (!deals || !Array.isArray(deals)) return [];
 
+    // Crear un mapa de magic numbers a nombres de EA para búsqueda rápida
+    const eaMagicMap = {};
+    if (accountEAs && accountEAs.length > 0) {
+      accountEAs.forEach((ea) => {
+        // Asegurarse de que el magic number se almacene como string para comparaciones consistentes
+        eaMagicMap[ea.magic.toString()] = ea.name;
+      });
+    }
+
+    console.log("EA Magic Map:", eaMagicMap);
+
     return deals.map((deal) => {
       // Determinar si es un mensaje del nuevo formato (con positionId, price_open, etc.)
       const isNewFormat = deal.hasOwnProperty("positionId");
 
+      let magic = 0;
+      let eaName = "Manual";
+
       if (isNewFormat) {
+        // Obtener el magic number de la operación
+        magic = deal.magic || 0;
+
+        // Buscar si el magic number coincide con alguna EA registrada
+        // Ahora comprobamos todos los magic numbers, incluido el 0
+        const matchedEAName = eaMagicMap[magic.toString()];
+        if (matchedEAName) {
+          eaName = matchedEAName;
+        } else if (magic !== 0) {
+          // Solo si no es 0 y no coincide con ninguna EA, intentamos extraer del comentario
+          const extractedName = extractEAName(deal.comment);
+          eaName = extractedName || "EA Desconocida";
+        }
+        // Si es 0 y no hay EA registrada con magic 0, se queda como "Manual"
+
+        // Determinar correctamente si es compra o venta
+        // En el nuevo formato, LONG es compra y SHORT es venta
+        const side = deal.side === "SHORT" ? "Venta" : "Compra";
+
         // Nuevo formato
         return {
           ticket: deal.positionId,
           symbol: deal.symbol,
-          side: deal.side === "LONG" ? "Compra" : "Venta",
+          side: side,
           volume: deal.volume,
           entryPrice: deal.price_open,
           exitPrice: deal.price_close,
@@ -177,16 +213,32 @@ export default function AccountDetail() {
           profit: deal.profit,
           completed: true,
           comment: deal.comment || "",
-          magic: deal.magic || 0,
-          eaName: deal.magic === 0 ? "Manual" : extractEAName(deal.comment),
+          magic: magic,
+          eaName: eaName,
         };
       } else {
         // Formato anterior
         const isEntry = deal.side === "IN";
+
+        // En el formato anterior, intentar obtener el magic number si está disponible
+        magic = deal.magic || 0;
+
+        // Buscar si el magic number coincide con alguna EA registrada
+        // Ahora comprobamos todos los magic numbers, incluido el 0
+        const matchedEAName = eaMagicMap[magic.toString()];
+        if (matchedEAName) {
+          eaName = matchedEAName;
+        }
+
+        // Determinar correctamente si es compra o venta
+        // En el formato anterior, necesitamos verificar el tipo real de operación
+        // Asumimos que es compra a menos que se indique explícitamente como venta
+        const side = deal.type === "SELL" ? "Venta" : "Compra";
+
         return {
           ticket: deal.ticket,
           symbol: deal.symbol,
-          side: isEntry ? "Compra" : "Venta",
+          side: side,
           volume: deal.volume,
           entryPrice: deal.price,
           exitPrice: 0,
@@ -195,8 +247,8 @@ export default function AccountDetail() {
           profit: deal.profit,
           completed: !isEntry,
           comment: "",
-          magic: 0,
-          eaName: "Manual",
+          magic: magic,
+          eaName: eaName,
         };
       }
     });
@@ -207,7 +259,7 @@ export default function AccountDetail() {
     if (!history || history.length === 0) return [];
 
     return processDeals(history);
-  }, [history]);
+  }, [history, accountEAs]);
 
   // Calcular PnL
   const pnl = useMemo(() => {
@@ -280,8 +332,8 @@ export default function AccountDetail() {
         setAccountData(accountData);
 
         if (accountData) {
-          // Cargar EAs asociados a esta cuenta
-          const accountEAs = getAccountEAs(accountData.id);
+          // Cargar EAs asociados a esta cuenta usando el número de cuenta
+          const accountEAs = getAccountEAs(accountData.accountNumber);
           setAccountEAs(accountEAs);
           console.log("EAs cargados:", accountEAs);
         }
@@ -443,42 +495,91 @@ export default function AccountDetail() {
 
     // Datos para el gráfico de balance
     const balanceData = [];
-    let runningBalance = accountData.balance || 0;
 
-    // Restar las ganancias actuales para obtener el balance inicial
-    const currentProfit = positions.reduce((sum, pos) => sum + pos.profit, 0);
-    runningBalance -= currentProfit;
+    // Comenzar con balance inicial (no restar las ganancias actuales)
+    // Ya que solo queremos mostrar el historial, no las posiciones abiertas
+    let runningBalance = 0; // Comenzar desde cero y acumular ganancias/pérdidas
 
     // Ordenar el historial por fecha (de más antiguo a más reciente)
     const sortedHistory = [...history].sort((a, b) => {
-      const dateA = new Date(a.time);
-      const dateB = new Date(b.time);
-      return dateA - dateB;
-    });
+      try {
+        // Asegurarse de que las fechas sean válidas
+        const dateA = new Date(a.time);
+        const dateB = new Date(b.time);
 
-    // Añadir punto inicial
-    balanceData.push({
-      date:
-        sortedHistory.length > 0 ? new Date(sortedHistory[0].time) : new Date(),
-      balance: runningBalance,
-    });
+        if (isNaN(dateA.getTime()) || isNaN(dateB.getTime())) {
+          console.log("Fecha inválida detectada:", a.time, b.time);
+          return 0;
+        }
 
-    // Calcular balance para cada operación cerrada
-    sortedHistory.forEach((deal) => {
-      if (deal.profit) {
-        runningBalance += deal.profit;
-        balanceData.push({
-          date: new Date(deal.time),
-          balance: runningBalance,
-        });
+        return dateA - dateB;
+      } catch (error) {
+        console.error("Error al ordenar fechas:", error);
+        return 0;
       }
     });
 
-    // Añadir balance actual con las posiciones abiertas
-    balanceData.push({
-      date: new Date(),
-      balance: runningBalance + currentProfit,
-    });
+    console.log("Historial ordenado:", sortedHistory.length, "operaciones");
+
+    // Si no hay operaciones, mostrar una línea plana con varios puntos
+    if (sortedHistory.length === 0) {
+      const today = new Date();
+
+      // Generar 5 puntos en los últimos 5 días para mostrar un gráfico más representativo
+      for (let i = 4; i >= 0; i--) {
+        const date = new Date(today);
+        date.setDate(date.getDate() - i);
+
+        balanceData.push({
+          date: date,
+          balance: 0,
+        });
+      }
+    } else {
+      // Añadir punto inicial con fecha válida
+      const initialDate = new Date(sortedHistory[0].time);
+
+      // Verificar que la fecha inicial sea válida
+      const validInitialDate = !isNaN(initialDate.getTime())
+        ? initialDate
+        : new Date();
+
+      balanceData.push({
+        date: validInitialDate,
+        balance: runningBalance,
+      });
+
+      // Calcular balance para cada operación cerrada
+      sortedHistory.forEach((deal) => {
+        if (deal.profit !== undefined) {
+          runningBalance += parseFloat(deal.profit);
+
+          // Crear y validar la fecha
+          let dealDate;
+          try {
+            dealDate = new Date(deal.time);
+            if (isNaN(dealDate.getTime())) {
+              console.log("Fecha inválida en operación:", deal.time);
+              dealDate = new Date(); // Usar fecha actual como fallback
+            }
+          } catch (error) {
+            console.error("Error al procesar fecha de operación:", error);
+            dealDate = new Date(); // Usar fecha actual como fallback
+          }
+
+          balanceData.push({
+            date: dealDate,
+            balance: runningBalance,
+            ticket: deal.ticket,
+            symbol: deal.symbol,
+            type: deal.side,
+            profit: deal.profit,
+          });
+        }
+      });
+    }
+
+    console.log("Datos de balance generados:", balanceData.length, "puntos");
 
     // Datos para el gráfico de ganadoras/perdedoras
     const winLossData = {
@@ -507,7 +608,7 @@ export default function AccountDetail() {
       winLossData,
       performanceData,
     };
-  }, [accountData, history, positions]);
+  }, [accountData, history]);
 
   // Calcular estadísticas adicionales
   const additionalStats = useMemo(() => {
@@ -631,7 +732,7 @@ export default function AccountDetail() {
   }
 
   return (
-    <div className="flex-1 p-6 md:p-8 space-y-6">
+    <div className="flex-1 p-4 md:p-6 space-y-4">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold tracking-tight">
@@ -667,7 +768,7 @@ export default function AccountDetail() {
       </div>
 
       <Tabs defaultValue="overview" className="space-y-4">
-        <TabsList>
+        <TabsList className="w-full justify-start overflow-x-auto">
           <TabsTrigger value="overview">Resumen</TabsTrigger>
           <TabsTrigger value="positions">Posiciones Abiertas</TabsTrigger>
           <TabsTrigger value="history">Historial de Operaciones</TabsTrigger>
@@ -675,8 +776,9 @@ export default function AccountDetail() {
         </TabsList>
 
         <TabsContent value="overview" className="space-y-4">
+          {/* Resumen de la cuenta */}
           <Card>
-            <CardHeader className="flex flex-row items-center justify-between">
+            <CardHeader>
               <CardTitle>Resumen de la Cuenta</CardTitle>
             </CardHeader>
             <CardContent>
@@ -786,61 +888,87 @@ export default function AccountDetail() {
             </CardContent>
           </Card>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Card className="col-span-1 md:col-span-2">
+          {/* Gráficos */}
+          <div className="space-y-4">
+            {/* Gráfico de balance */}
+            <Card className="col-span-3">
               <CardHeader>
                 <CardTitle>Evolución del Balance</CardTitle>
               </CardHeader>
-              <CardContent className="h-80">
+              <CardContent>
                 {loading ? (
-                  <div className="h-full w-full flex items-center justify-center">
+                  <div className="h-[300px]">
                     <Skeleton className="h-full w-full" />
                   </div>
                 ) : (
-                  <BalanceChart data={chartData.balanceData} />
+                  <div className="h-auto">
+                    <ModernBalanceChart
+                      data={chartData.balanceData}
+                      title="Evolución del Balance"
+                      description={`${chartData.balanceData.length} operaciones procesadas`}
+                    />
+                  </div>
                 )}
               </CardContent>
             </Card>
 
-            <Card>
-              <CardHeader>
-                <CardTitle>Operaciones Ganadoras/Perdedoras</CardTitle>
-              </CardHeader>
-              <CardContent className="h-60">
-                {loading ? (
-                  <div className="h-full w-full flex items-center justify-center">
-                    <Skeleton className="h-full w-full" />
-                  </div>
-                ) : (
-                  <WinLossChart data={chartData.winLossData} />
-                )}
-              </CardContent>
-            </Card>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 col-span-3">
+              {/* Gráfico de operaciones ganadoras/perdedoras */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Proporción Ganadas/Perdidas</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {loading ? (
+                    <div className="h-[350px]">
+                      <Skeleton className="h-full w-full" />
+                    </div>
+                  ) : (
+                    <div className="h-auto">
+                      <ModernWinLossChart
+                        data={chartData.winLossData}
+                        title="Proporción Ganadas/Perdidas"
+                        description={`${chartData.winLossData.length} operaciones cerradas`}
+                      />
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
 
-            <Card>
-              <CardHeader>
-                <CardTitle>Rendimiento por Símbolo</CardTitle>
-              </CardHeader>
-              <CardContent className="h-60">
-                {loading ? (
-                  <div className="h-full w-full flex items-center justify-center">
-                    <Skeleton className="h-full w-full" />
-                  </div>
-                ) : (
-                  <PerformanceChart
-                    data={chartData.performanceData.slice(0, 5)}
-                  />
-                )}
-              </CardContent>
-            </Card>
+              {/* Gráfico de rendimiento por símbolo */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Rendimiento por Símbolo</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {loading ? (
+                    <div className="h-[350px]">
+                      <Skeleton className="h-full w-full" />
+                    </div>
+                  ) : (
+                    <div className="h-auto">
+                      <ModernPerformanceChart
+                        data={chartData.performanceData}
+                        title="Rendimiento por Símbolo"
+                        description={`Top ${Math.min(
+                          chartData.performanceData.length,
+                          10
+                        )} símbolos`}
+                      />
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
           </div>
 
+          {/* Estadísticas adicionales */}
           <Card>
             <CardHeader>
               <CardTitle>Estadísticas de Trading</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="flex flex-col p-4 border rounded-lg">
                   <span className="text-sm text-muted-foreground">
                     Operaciones Totales
@@ -912,24 +1040,6 @@ export default function AccountDetail() {
                     {additionalStats.averageTradeDuration.toFixed(1)} h
                   </span>
                 </div>
-
-                <div className="flex flex-col p-4 border rounded-lg">
-                  <span className="text-sm text-muted-foreground">
-                    Rachas Ganadoras
-                  </span>
-                  <span className="text-2xl font-bold text-green-500">
-                    {additionalStats.consecutiveWins}
-                  </span>
-                </div>
-
-                <div className="flex flex-col p-4 border rounded-lg">
-                  <span className="text-sm text-muted-foreground">
-                    Rachas Perdedoras
-                  </span>
-                  <span className="text-2xl font-bold text-red-500">
-                    {additionalStats.consecutiveLosses}
-                  </span>
-                </div>
               </div>
             </CardContent>
           </Card>
@@ -947,40 +1057,56 @@ export default function AccountDetail() {
                 </div>
               ) : (
                 <div className="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Ticket</TableHead>
-                        <TableHead>Tipo</TableHead>
-                        <TableHead>Símbolo</TableHead>
-                        <TableHead>Volumen</TableHead>
-                        <TableHead>Precio Apertura</TableHead>
-                        <TableHead>P/L</TableHead>
-                        <TableHead>EA</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="text-left py-3 px-4">Fecha</th>
+
+                        <th className="text-left py-3 px-4">Símbolo</th>
+                        <th className="text-left py-3 px-4">Tipo</th>
+                        <th className="text-left py-3 px-4">Volumen</th>
+                        <th className="text-left py-3 px-4">Precio Apertura</th>
+                        <th className="text-left py-3 px-4">Magic</th>
+
+                        <th className="text-right py-3 px-4">P/L</th>
+                      </tr>
+                    </thead>
+                    <tbody>
                       {positions.map((position, index) => (
-                        <TableRow key={`position-${position.ticket}-${index}`}>
-                          <TableCell>{position.ticket}</TableCell>
-                          <TableCell>{position.type}</TableCell>
-                          <TableCell>{position.symbol}</TableCell>
-                          <TableCell>{position.volume}</TableCell>
-                          <TableCell>{position.open_price}</TableCell>
-                          <TableCell
-                            className={
-                              position.profit >= 0
+                        <tr
+                          key={`pos-${position.ticket || position.id || index}`}
+                          className="border-b hover:bg-muted/50"
+                        >
+                          <td className="py-3 px-4">
+                            {new Date(position.time).toLocaleString()}
+                          </td>
+                          <td className="py-3 px-4">{position.symbol}</td>
+                          <td className="py-3 px-4">
+                            {position.side === "BUY" ? (
+                              <Badge className="bg-green-500">Compra</Badge>
+                            ) : (
+                              <Badge className="bg-red-500">Venta</Badge>
+                            )}
+                          </td>
+                          <td className="py-3 px-4">{position.volume}</td>
+                          <td className="py-3 px-4">
+                            {position.open_price || position.price_open}
+                          </td>
+                          <td className="py-3 px-4">{position.magic}</td>
+
+                          <td
+                            className={`py-3 px-4 text-right ${
+                              parseFloat(position.profit) >= 0
                                 ? "text-green-500"
                                 : "text-red-500"
-                            }
+                            }`}
                           >
-                            {position.profit.toFixed(2)}$
-                          </TableCell>
-                          <TableCell>{position.comment || "-"}</TableCell>
-                        </TableRow>
+                            {parseFloat(position.profit).toFixed(2)}$
+                          </td>
+                        </tr>
                       ))}
-                    </TableBody>
-                  </Table>
+                    </tbody>
+                  </table>
                 </div>
               )}
             </CardContent>
@@ -1012,7 +1138,6 @@ export default function AccountDetail() {
                           <TableHead>Precio</TableHead>
                           <TableHead>P/L</TableHead>
                           <TableHead>EA</TableHead>
-                          <TableHead>Estado</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -1038,17 +1163,6 @@ export default function AccountDetail() {
                               {operation.profitLoss.toFixed(2)}$
                             </TableCell>
                             <TableCell>{operation.eaName || "-"}</TableCell>
-                            <TableCell>
-                              {operation.status === "closed" ? (
-                                <span className="px-2 py-1 rounded-full text-xs bg-green-100 text-green-800">
-                                  Cerrada
-                                </span>
-                              ) : (
-                                <span className="px-2 py-1 rounded-full text-xs bg-blue-100 text-blue-800">
-                                  Abierta
-                                </span>
-                              )}
-                            </TableCell>
                           </TableRow>
                         ))}
 
@@ -1065,10 +1179,14 @@ export default function AccountDetail() {
                                   </div>
                                 )}
                               </TableCell>
-                              <TableCell>{deal.side || "Compra"}</TableCell>
                               <TableCell>
-                                {deal.symbol === "XAUUSD" ? "ORO" : deal.symbol}
+                                {deal.side === "Compra" ? (
+                                  <Badge className="bg-green-500">Compra</Badge>
+                                ) : (
+                                  <Badge className="bg-red-500">Venta</Badge>
+                                )}
                               </TableCell>
+                              <TableCell>{deal.symbol}</TableCell>
                               <TableCell>{deal.volume.toFixed(2)}</TableCell>
                               <TableCell>
                                 {deal.entryPrice.toFixed(5)}
@@ -1088,17 +1206,6 @@ export default function AccountDetail() {
                                 {deal.profit.toFixed(2)}$
                               </TableCell>
                               <TableCell>{deal.eaName || "-"}</TableCell>
-                              <TableCell>
-                                {deal.completed ? (
-                                  <span className="px-2 py-1 rounded-full text-xs bg-green-100 text-green-800">
-                                    Cerrada
-                                  </span>
-                                ) : (
-                                  <span className="px-2 py-1 rounded-full text-xs bg-blue-100 text-blue-800">
-                                    Abierta
-                                  </span>
-                                )}
-                              </TableCell>
                             </TableRow>
                           ))}
                       </TableBody>
@@ -1169,13 +1276,13 @@ export default function AccountDetail() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>Expert Advisors</CardTitle>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowCreateEAForm(true)}
-              >
-                Crear EA
-              </Button>
+              <CreateEAForm
+                accountId={accountData?.id || ""}
+                onSuccess={() => {
+                  setShowCreateEAForm(false);
+                  loadEAs();
+                }}
+              />
             </CardHeader>
             <CardContent>
               {loading ? (
@@ -1199,18 +1306,53 @@ export default function AccountDetail() {
                       {accountEAs.map((ea) => {
                         // Calcular P/L para este EA
                         const eaMagic = parseInt(ea.magic);
-                        const eaPositions =
-                          accountData?.positions?.filter(
-                            (pos) => parseInt(pos.magic) === eaMagic
-                          ) || [];
-                        const eaDeals =
-                          accountData?.deals?.filter(
-                            (deal) => parseInt(deal.magic) === eaMagic
-                          ) || [];
+                        console.log(
+                          `Calculando P/L para EA: ${ea.name}, Magic: ${eaMagic}`
+                        );
 
-                        const totalPL =
-                          eaDeals.reduce((sum, deal) => sum + deal.profit, 0) +
-                          eaPositions.reduce((sum, pos) => sum + pos.profit, 0);
+                        // Obtener posiciones del WebSocket (datos en tiempo real)
+                        const livePositions =
+                          accounts[accountNumber]?.positions || [];
+                        const eaPositions = livePositions.filter(
+                          (pos) => parseInt(pos.magic || 0) === eaMagic
+                        );
+
+                        // Obtener operaciones históricas del WebSocket
+                        const liveDeals = accounts[accountNumber]?.deals || [];
+                        const eaDeals = liveDeals.filter(
+                          (deal) => parseInt(deal.magic || 0) === eaMagic
+                        );
+
+                        console.log(
+                          `EA ${ea.name}: ${eaPositions.length} posiciones, ${eaDeals.length} operaciones históricas`
+                        );
+
+                        // Calcular P/L total (operaciones cerradas + posiciones abiertas)
+                        let dealsProfit = 0;
+                        let positionsProfit = 0;
+
+                        if (eaDeals.length > 0) {
+                          dealsProfit = eaDeals.reduce((sum, deal) => {
+                            const profit = parseFloat(deal.profit || 0);
+                            return sum + profit;
+                          }, 0);
+                        }
+
+                        if (eaPositions.length > 0) {
+                          positionsProfit = eaPositions.reduce((sum, pos) => {
+                            const profit = parseFloat(pos.profit || 0);
+                            return sum + profit;
+                          }, 0);
+                        }
+
+                        const totalPL = dealsProfit + positionsProfit;
+                        console.log(
+                          `EA ${ea.name} P/L: ${totalPL.toFixed(
+                            2
+                          )}$ (Deals: ${dealsProfit.toFixed(
+                            2
+                          )}$, Positions: ${positionsProfit.toFixed(2)}$)`
+                        );
 
                         return (
                           <tr
@@ -1266,34 +1408,19 @@ export default function AccountDetail() {
                   <p className="mb-4">
                     No hay EAs configurados para esta cuenta
                   </p>
-                  <Button
-                    variant="outline"
-                    onClick={() => setShowCreateEAForm(true)}
-                  >
-                    Crear EA
-                  </Button>
+                  <CreateEAForm
+                    accountId={accountData?.id || ""}
+                    onSuccess={() => {
+                      setShowCreateEAForm(false);
+                      loadEAs();
+                    }}
+                  />
                 </div>
               )}
             </CardContent>
           </Card>
         </TabsContent>
       </Tabs>
-
-      {/* Diálogo para crear EA */}
-      <Dialog open={showCreateEAForm} onOpenChange={setShowCreateEAForm}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Crear Expert Advisor</DialogTitle>
-          </DialogHeader>
-          <CreateEAForm
-            accountId={accountData?.id || ""}
-            onSuccess={() => {
-              setShowCreateEAForm(false);
-              loadEAs();
-            }}
-          />
-        </DialogContent>
-      </Dialog>
 
       {/* Diálogo para eliminar cuenta */}
       <Dialog open={deleteAccountDialog} onOpenChange={setDeleteAccountDialog}>

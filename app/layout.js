@@ -25,13 +25,20 @@ export default function RootLayout({ children }) {
   return (
     <html lang="es" suppressHydrationWarning>
       <body className={cn("min-h-screen bg-background font-sans antialiased", geistSans.variable)}>
-        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
           <AccountsProvider>
-            <Sidebar />
-            <main className="md:ml-64">
-              <Toaster />
-              {children}
-            </main>
+            <div className="flex min-h-screen">
+              <Sidebar />
+              <main className="flex-1 ml-[240px]">
+                <Toaster />
+                {children}
+              </main>
+            </div>
           </AccountsProvider>
         </ThemeProvider>
       </body>
