@@ -669,11 +669,28 @@ export default function EADetail() {
                           className="border-b hover:bg-muted/50"
                         >
                           <td className="py-3 px-4">
-                            {new Date(position.time).toLocaleString()}
+                            {position.time ? (
+                              <span className="block font-medium">
+                                {new Date(position.time * 1000).toLocaleDateString('es-ES', {
+                                  day: '2-digit',
+                                  month: '2-digit',
+                                  year: 'numeric'
+                                })}
+                                {', '}
+                                {new Date(position.time * 1000).toLocaleTimeString('es-ES', {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                  hour12: false
+                                })}
+                              </span>
+                            ) : (
+                              "Fecha no disponible"
+                            )}
                           </td>
                           <td className="py-3 px-4">{position.symbol}</td>
                           <td className="py-3 px-4">
-                            {position.side === "BUY" ? (
+                            {position.side === "BUY" || position.side === "LONG" ? (
                               <Badge className="bg-green-500">Compra</Badge>
                             ) : (
                               <Badge className="bg-red-500">Venta</Badge>
@@ -681,16 +698,17 @@ export default function EADetail() {
                           </td>
                           <td className="py-3 px-4">{position.volume}</td>
                           <td className="py-3 px-4">
-                            {position.open_price || position.price_open}
+                            {parseFloat(position.open_price || position.price_open).toFixed(5)}
                           </td>
                           <td className="py-3 px-4">{position.magic}</td>
                           <td
-                            className={`py-3 px-4 text-right ${
+                            className={`py-3 px-4 text-right font-medium ${
                               parseFloat(position.profit) >= 0
                                 ? "text-green-500"
                                 : "text-red-500"
                             }`}
                           >
+                            {parseFloat(position.profit) > 0 ? "+" : ""}
                             {parseFloat(position.profit).toFixed(2)}$
                           </td>
                         </tr>
